@@ -1,0 +1,36 @@
+---
+apiVersion: "rbac.istio.io/v1alpha1"
+kind: ServiceRole
+metadata:
+  name: ratings-requestor
+  namespace: default
+spec:
+  rules:
+  - services: ["ratings.default.svc.cluster.local"]
+---
+apiVersion: "rbac.istio.io/v1alpha1"
+kind: ServiceRole
+metadata:
+  name: reviews-requestor
+  namespace: default
+spec:
+  rules:
+  - services: ["reviews.default.svc.cluster.local"]
+---
+apiVersion: "rbac.istio.io/v1alpha1"
+kind: ServiceRole
+metadata:
+  name: details-requestor
+  namespace: default
+spec:
+  rules:
+  - services: ["details.default.svc.cluster.local"]
+---
+apiVersion: "rbac.istio.io/v1alpha1"
+kind: ServiceRole
+metadata:
+  name: productpage-requestor
+  namespace: default
+spec:
+  rules:
+  - services: ["productpage.default.svc.cluster.local"]
