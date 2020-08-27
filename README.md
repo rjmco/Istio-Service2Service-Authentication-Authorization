@@ -1,276 +1,176 @@
 Istio Service to Service Authentication and Authorization demonstration
 =======================================================================
 
-Environment preparation
------------------------
+Local Environment preparation
+-----------------------------
 
 1. Set the following environment variables to help the demonstration process:
 
 ```
+export BILLING_ACCOUNT=<billing_account>
 export PROJECT_ID=<project_id>
+export ZONE=europe-west2-a
 ```
 
-Demonstration
--------------
+Infrastructure Deployment steps
+-------------------------------
 
-### Provision a Cluster
+### Create a project
 
-1. Create a cluster with `gcloud` on a project with a default VPC:
+1. Create a project and link it with a billing account:
+
+```
+gcloud projects create $PROJECT_ID --no-enable-cloud-apis
+gcloud beta billing projects link $PROJECT_ID --billing-account=$BILLING_ACCOUNT
+```
+
+### Provision a GKE cluster
+
+1. Enable the GKE API and create a cluster with `gcloud` on a project with a default VPC:
 
 ```
 gcloud --project $PROJECT_ID services enable container.googleapis.com
-gcloud beta --project $PROJECT_ID container clusters create k0 --zone europe-west2-a --addons Istio --machine-type n1-standard-2
+gcloud --project $PROJECT_ID container clusters create k0 --zone $ZONE --machine-type e2-standard-2 --release-channel=rapid
 ```
 
-1. Get the cluster's credentials:
+Note: this process is known to work with GKE 1.17 and 1.18. This may change over time.
+
+2. Get the cluster's credentials:
 
 ```
-gcloud --project $PROJECT_ID container clusters get-credentials k0 --zone europe-west2-a
+gcloud --project $PROJECT_ID container clusters get-credentials k0 --zone $ZONE
 ```
 
-### Deploying Open-Source ISTIO
+Software deployment steps
+-------------------------
 
-1. Follow the [Installing Istio on a GKE cluster](https://cloud.google.com/istio/docs/how-to/installing-oss) guide with the following mofifications.
+### Deploying Open-Source Istio
 
-* When installing istio's Helm template, make sure you add the `--values install/kubernetes/helm/istio/values-istio-demo.yaml` parameter as shown below:
+On your laptop, on bash/zsh terminal, follow the [Getting Started](https://istio.io/latest/docs/setup/getting-started/)
+guide and install Istio, the sample Bookinfo application and Kiali Dashboard or follow the following steps:
 
-```
-helm template install/kubernetes/helm/istio \
-  --name istio --namespace istio-system \
-  --values install/kubernetes/helm/istio/values-istio-demo.yaml \
-| kubectl apply -f -
-```
-
-1. Wait for all istio-system workloads and services to become available:
+1. Download Istio:
 
 ```
-kubectl get all -n istio-system
+curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.6.8 TARGET_ARCH=x86_64 sh -
+cd istio-1.6.8
 ```
 
-1. When the `istio-ingressgateway` is given an `EXTERNAL-IP` set some environment variables to ease the demonstration:
+2. Install Istio on the GKE cluster with the demonstration profile:
 
 ```
-export INGRESS_HOST=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-export INGRESS_PORT=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="http2")].port}')
-export GATEWAY_URL=$INGRESS_HOST:$INGRESS_PORT
+export PATH=$PWD/bin:$PATH
+istioctl install --set profile=demo
 ```
 
-### Set Istio's starting configuration
-
-1. Enable automatic sidecar injection
+3. Enable Istio's Envoy proxy sidecar container injection into Pods:
 
 ```
 kubectl label namespace default istio-injection=enabled
 ```
 
-### Set authentication to MTLS Permissive
+4. Install the Bookinfo sample application and wait for it to come online (use CTRL+c to exist the `watch` command):
+
+```
+kubectl apply -f samples/bookinfo/platform/kube/bookinfo.yaml
+kubectl apply -f samples/bookinfo/networking/bookinfo-gateway.yaml
+kubectl get service
+watch -n 5 kubectl get pods
+```
+
+5. Make sure Istio installed correctly and fetch a few details of its configuration to help on follow-up steps:
+
+```
+istioctl analyze
+kubectl get svc istio-ingressgateway -n istio-system
+export INGRESS_HOST=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+export INGRESS_PORT=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="http2")].port}')
+export SECURE_INGRESS_PORT=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="https")].port}')
+export GATEWAY_URL=$INGRESS_HOST:$INGRESS_PORT
+```
+
+6. Install bundled Istio addons including the Kiali dashboard. A few of the steps are meant to work around errors
+deploying Grafana:
+
+```
+kubectl apply -f samples/addons
+kubectl apply -f samples/addons
+kubectl delete -f samples/addons/grafana.yaml
+kubectl apply -f samples/addons/grafana.yaml
+kubectl apply -f samples/addons
+```
+
+7. Wait for Kiali to be deployed and open a connection to it locally:
+
+```
+while ! kubectl wait --for=condition=available --timeout=600s deployment/kiali -n istio-system; do sleep 1; done
+istioctl dashboard kiali &
+cd ..
+```
+
+Service to Service Authentication and Authorization configuration on Istio
+--------------------------------------------------------------------------
+
+1. Navigate through Kiali dashboard to get a sense of what it provides.
+
+2. Verify that Bookinfo is up and running the following command and using the result on your browser:
+
+```
+echo http://"$GATEWAY_URL/productpage"
+```
+
+3. Check Kiali dashboard's graph to see the new additions to it.
+
+4. Generate some traffic throughout the demonstration:
+
+```
+for i in $(seq 1 10000); do curl -s http://${GATEWAY_URL}/productpage -o /dev/null; sleep 0.5; done &
+```
+
+5. Show Kiali details such as RPS, latency, etc., through the Graph section.
+
+### Set Peer Authentication to MTLS Permissive
 
 We start with lax security to restrict it as the demonstration goes.
 
-1. Set the mesh's authentication policy to `PERMISSIVE`. This allows for authenticated and unautheticated communication to happen:
+1. Explicitly set the mesh's authentication policy to `PERMISSIVE` (this is the default behaviour on Istio 1.6.8 and
+therefore the cluster behaviour is not changed). This allows for authenticated and un-authenticated communication to
+happen:
 
 ```
-cat MeshPolicy-Permissive.yaml
-kubectl apply -f MeshPolicy-Permissive.yaml
+cat PeerAuthentication-Permissive.yaml
+kubectl apply -f PeerAuthentication-Permissive.yaml
 ```
 
-### Deploy Bookinfo Demonstration Application
+2. Notice on Kiali's graph that the mTLS "lock" icon is shown when the "Security Badges" are turned on.
 
-The bookinfo application is the main example shown on Istio's [documentation](https://istio.io/docs/examples/bookinfo/). We'll leverage it as it is well known.
+### Set Peer Authentication to MTLS Strict
 
-#### Bookinfo Architecture Diagram
-
-![Bookinfo Architecture Diagram][bookinfo-architecture-diagram]
-
-#### Bookinfo Deployment Steps
-
-1. Deploy the Bookinfo app:
+1. Set the mesh's authentication policy to `STRICT`. This configuration will block any un-authenticated communication
+between services from happening:
 
 ```
-cat bookinfo.yaml
-kubectl apply -f bookinfo.yaml 
+cat PeerAuthentication-Strict.yaml
+kubectl apply -f PeerAuthentication-Strict.yaml
 ```
 
-1. Check services and pods are running:
+On Bookinfo running on Istio 1.6.8 service mesh, this does not change any behaviour. It just makes sure other workloads
+running on the service mesh are not communicating in an un-authenticated way.
+
+### Enable Authorization between microservices
+
+Authorization enforcement is disabled by default on the Istio service mesh 1.6.8. 
+
+1. To enable Authorization enforcement on the `default` namespace a `AuthorizationPolicy` object needs to be create as
+shown below:
 
 ```
-kubectl get services
-kubectl get pods
+cat deny-all-AuthorizationPolicy.yaml
+kubectl apply -f deny-all-AuthorizationPolicy.yaml
 ```
 
-1. Test a connection from the ratings microservice to the productpage microservice:
-
-```
-kubectl exec -it $(kubectl get pod -l app=ratings -o jsonpath='{.items[0].metadata.name}') -c ratings -- curl productpage:9080/productpage | grep -o "<title>.*</title>"
-```
-
-The result should show `<title>Simple Bookstore App</title>`
-
-1. Test a connection to the application through the Ingress Gateway:
-
-On the command-line:
-```
-curl -v http://${GATEWAY_URL}/productpage
-```
-
-On the browser:
-```
-echo http://${GATEWAY_URL}/productpage
-```
-
-This should fail because istio's default ingress gateway is not at this point configured to receive and route traffic to bookinfo's microservices.
-
-1. Deploy bookinfo's Gateway and VirtualService CRD objects.
-
-```
-cat bookinfo-gateway.yaml
-kubectl apply -f bookinfo-gateway.yaml 
-```
-
-This selects the default istio gateway and configures it to receive HTTP requests on port 80 on any hostname. It also specifies which request paths should be considered routes to the productpage microservice.
-
-1. Now that the ingress routing rules have been specified, test a connection to the application through the Ingress Gateway:
-
-```
-curl -s http://${GATEWAY_URL}/productpage | grep -o "<title>.*</title>"
-```
-
-The result should show `<title>Simple Bookstore App</title>`.
-
-1. Access Bookinfo through your browser:
-
-```
-echo http://${GATEWAY_URL}/productpage
-```
-
-You should be able to see the Bookinfo webpage.
-
-### Accessing Kiali's Dashboard
-
-1. On a separate terminal window, proxy Kiali's dashboard to your local machine:
-
-```
-kubectl -n istio-system port-forward svc/kiali 20001:20001
-```
-
-1. Open Kiali dashboard on a browser [http://localhost:20001]()
-
-1. Log in with `admin` as both a username and a password.
-
-1. Navigate to the `Graph` item on the left-side menu.
-
-1. Configure the graphic by selecting the `default` namespace,  `Versioned app graph`, `No edge labels`, all badges including `security`, `Traffic animation` and `Every 10s` refresh rate.
-
-1. On a separate window, run the following command to generate traffic:
-
-```
-for i in $(seq 1 10000); do curl -s  http://${GATEWAY_URL}/productpage -o /dev/null; done
-```
-
-1. Watch Kiali dashboard come alive with a graph of the services and animation of the traffic flow.
-
-### Securing the Bookinfo application
-
-In this section we will secure the Bookinfo application by first enabling TLS authentication and enable transport-level encryption and second by enabling authorization.
-
-#### Enable TLS Authentication and transport-level encryption
-
-1. Change the mesh's policy to require mTLS (mutual-TLS) authentication and encryption:
-
-```
-cat MeshPolicy-Strict.yaml
-kubectl apply -f MeshPolicy-Strict.yaml
-```
-
-1. Confirm that after setting the mesh's policy to STRICT that the application is no longer available:
-
-With the command-line:
-```
-curl -v http://${GATEWAY_URL}/productpage
-```
-
-Or on your browser:
-```
-echo http://${GATEWAY_URL}/productpage
-```
-
-On both cases the `upstream connect error or disconnect/reset before headers. reset reason: connection termination` message should be returned. You should also see that curl returned a `503 Gateway Unavailable`
-
-On the Kiali dashboard, the traffic flow arrows should become gray, indicating no traffic flowing and red if errors for productpage as it is unable to contact the microservices it depends on.
-
-1. For the sake of demonstration lets revert the mesh-wide policy to permissive and restrict the policy at the microservices level:
-
-```
-cat MeshPolicy-Permissive.yaml
-kubectl apply -f MeshPolicy-Permissive.yaml
-```
-
-1. The application should once again be available:
-
-Test with the command-line:
-```
-curl -v http://${GATEWAY_URL}/productpage
-```
-
-Test with your browser:
-```
-echo http://${GATEWAY_URL}/productpage
-```
-
-1. Now restrict the policy at the microservice level:
-
-```
-cat policy-all-mtls.yaml
-kubectl apply -f policy-all-mtls.yaml
-```
-
-1. Confirm that after setting the mesh's policy to STRICT that the application is no longer available:
-
-With the command-line:
-```
-curl -v http://${GATEWAY_URL}/productpage
-```
-
-Or on your browser:
-```
-echo http://${GATEWAY_URL}/productpage
-```
-
-The `MeshPolicy` and `Policy` objects only control the configuration on the Envoy Proxy making the request, not the Envoy proxies receiving the request. When setting `MeshPolicy` or `Policy` objects to STRICT mTLS, this forces the Envoy proxy making the request to use mTLS authentication and transport-level encryption. Which is only possible if the receiving Envoy proxy accepts mTLS.
-
-1. To enable the microservices' receiving Envoy proxies to accept TLS traffic, their `DestinationRules` needs to be set to allow it. Do so by:
-
-```
-cat destination-rule-all-mtls.yaml
-kubectl apply -f destination-rule-all-mtls.yaml
-```
-
-The above sets the traffic policy to accept mTLS with certificates signed by Citadel (`ISTIO_MUTUAL`).
-
-1. The application should once again be available:
-
-Test with the command-line:
-```
-curl -v http://${GATEWAY_URL}/productpage
-```
-
-Test with your browser:
-```
-echo http://${GATEWAY_URL}/productpage
-```
-
-#### Enable Authorization between microservices
-
-Authorization enforcement is disabled by default on the mesh. 
-
-1. To enable Authorization enforcement on the `default` namespace a `ClusterRbacConfig` object needs to be create as shown below:
-
-```
-cat ClusterRbacConfig-On-with-Inclusions.yaml
-kubectl apply -f ClusterRbacConfig-On-with-Inclusions.yaml
-```
-
-1. Confirm that after setting the default namespaces's RBAC configuration to `ON_WITH_INCLUSION` that the application is no longer available:
+2. Confirm that after setting the default namespaces's `AuthorizationPolicy` to deny all that the application is no
+longer available:
 
 With the command-line:
 ```
@@ -284,23 +184,23 @@ echo http://${GATEWAY_URL}/productpage
 
 The `RBAC: access denied` message should be returned. curl should also return a `403 Forbidden` code.
 
-To enable authorization we need to first create `ServiceRole` objects for each microservice and then create `ServiceRoleBinding` for consumers of those services.
+On the Kiali dashboard you will see communication originating from the `istio-ingressgateway` being blocked at the
+`productpage` microservice. The Kiali dashboard graph will show the arrow connecting the gateway and the app turn yellow
+and red as the success call rate drops from 100% to 0%. You will also notice that the arrow depicting calls made by the
+`productpage` microservice to other microservices, and arrows from these microservices to others downstream become grey.
+This is to be expected because as `productpage` is rejecting all calls, no new calls are being made to microservices
+downstream.
 
-1. First create the `ServiceRole` objects as shown below:
+3. To authorize communication incoming from `istio-ingressgateway` to the `productpage` microservice, we need to create
+an `AuthorizationPolicy` object with a label selector that is more specific than the `deny-all` `AuthorizationPolicy`
+created on the previous step. This can be done as follows:
 
 ```
-cat ServiceRoles.yaml
-kubectl apply -f ServiceRoles.yaml
+cat allow-all-productpage-viewer-AuthorizationPolicy.yaml
+kubectl apply -f allow-all-productpage-viewer-AuthorizationPolicy.yaml
 ```
 
-1. Second create a `ServiceRoleBinding` object to allow all authenticated and un-authenticated users to access the `productpage` microservice:
-
-```
-cat ServiceRoleBindings-1.yaml
-kubectl apply -f ServiceRoleBindings-1.yaml
-```
-
-1. The application should once again be available:
+The application should once again be available:
 
 Test with the command-line:
 ```
@@ -312,33 +212,70 @@ Test with your browser:
 echo http://${GATEWAY_URL}/productpage
 ```
 
-The `productpage` should be shown but notice that the details and the product reviews are not being shown. That's because the `productpage` cannot request anything from them.
+The `productpage` should be shown but notice that the details and the product reviews are not being shown. That's
+because the `productpage` cannot request anything from those microservices.
 
-1. Enable the remaining microservices to communicate with other microservices as shown on the architecture diagram:
+On the Kiali dashboard you will see:
+- the arrow between `istio-ingressgateway` and `productpage` turn from red to yellow then to green as the calls cease to
+be dropped.
+- the arrows between `productpage` and both `details` and `reviews` microservices turn from grey to red as the calls are
+dropped due to lack of authorization.
 
-![Bookinfo Architecture Diagram][bookinfo-architecture-diagram]
+4. Create the `AuthorizationPolicy` objects which allows the `productpage` microservice to access the `details`
+microservice:
 
 ```
-cat ServiceRoleBindings-2.yaml
-kubectl apply -f ServiceRoleBindings-2.yaml
+cat allow-productpage-details-viewer-AuthorizationPolicy.yaml
+kubectl apply -f allow-productpage-details-viewer-AuthorizationPolicy.yaml
 ```
 
-You will notice that the user is the same (`cluster.local/ns/default/sa/default`) for all `ServiceRoleBindings`. The reason for this is that all services are using the same service account (the `default` service account for the `namespace`). Another aspect to notice is that the user ID follows the SPIFFE ID path [1].
+Check the Bookinfo page with your browser:
+```
+echo http://${GATEWAY_URL}/productpage
+```
+
+The `details` section should no longer show an error. 
+
+On the Kiali dashboard you will see:
+- the arrow between `productpage` and `details` microservices turn from red to yellow then to green as the calls are
+once again accepted.
+
+5. Finally, create the `AuthorizationPolicy` objects to allow the remain microservices to be accessed:
+
+```
+cat allow-remaining-microservices-viewer-AuthorizationPolicy.yaml
+kubectl apply -f allow-remaining-microservices-viewer-AuthorizationPolicy.yaml
+```
+
+The principals shown on the `AuthorizationPolicy` objects follow the SPIFFE ID path [1]
+(`cluster.local/ns/default/sa/bookinfo-...`) are using service accounts which names start with `bookinfo-` that exist on
+the `default` namespace of the local Kubernetes cluster (`cluster.local`).
 
 [1] - [The SPIFFE Identity and Verifiable Identity Document](https://github.com/spiffe/spiffe/blob/master/standards/SPIFFE-ID.md)
 
-Clean-up
---------
+Infrastructure Clean-up
+-----------------------
 
-1. Destroy the demonstration cluster:
-
-```
-gcloud --project $PROJECT_ID container clusters delete k0 --zone europe-west2-a
-```
-
-1. Unset your configuration changes:
+1. Destroy the demonstration GKE cluster:
 
 ```
-unset PROJECT_ID INGRESS_HOST INGRESS_PORT GATEWAY_URL
+gcloud --project $PROJECT_ID container clusters delete k0 --zone $ZONE
 ```
-[bookinfo-architecture-diagram]: https://istio.io/docs/examples/bookinfo/withistio.svg "Bookinfo Architecture Diagram"
+
+2. Delete the test project:
+
+```
+gcloud projects delete $PROJECT_ID
+```
+
+3. Delete the temporary Istio installation files:
+
+```
+rm -rf istio-1.6.8
+```
+
+4. Unset your environment variables:
+
+```
+unset PROJECT_ID INGRESS_HOST INGRESS_PORT GATEWAY_URL ZONE
+```
